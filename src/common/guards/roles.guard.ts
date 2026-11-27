@@ -21,7 +21,7 @@ export class RolesGuard implements CanActivate {
     if (!user || !roles.includes(user.role)) {
       throw new ForbiddenException({
         code: 'FORBIDDEN',
-        message: 'You do not have permission for this action',
+        message: 'You do not have permission to do this. Ask a store manager or the business owner.',
       });
     }
     return true;

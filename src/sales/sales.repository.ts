@@ -1,16 +1,11 @@
-import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, In, Repository } from 'typeorm';
-import { CURRENCY, SaleStatus } from '../common/enums';
+import { Injectable, OnModuleInit } from '@nestjs/common';
+import { DataSource } from 'typeorm';
+import { SaleStatus } from '../common/enums';
 import { Payment, Sale, SaleItem } from '../database/entities';
 
 export interface NewSaleLine {
   productId: string;
-  sku: string;
-  productName: string;
   quantity: number;
-  unitPriceCents: number;
-  lineTotalCents: number;
 }
 
 export interface SaleGraph {
@@ -19,147 +14,187 @@ export interface SaleGraph {
   payment: Payment | null;
 }
 
+interface SaleJson {
+  id: string;
+  storeId: string;
+  userId: string;
+  status: SaleStatus;
+  currency: string;
+  totalCents: number;
+  idempotencyKey: string;
+  requestHash: string;
+  createdAt: string | Date;
+  items: SaleItem[] | string | null;
+  payment: Payment | string | null;
+  replayed?: boolean;
+}
+
 @Injectable()
-export class SalesRepository {
-  constructor(
-    @InjectRepository(Sale) private readonly sales: Repository<Sale>,
-    @InjectRepository(SaleItem) private readonly items: Repository<SaleItem>,
-    @InjectRepository(Payment) private readonly payments: Repository<Payment>,
-  ) {}
+export class SalesRepository implements OnModuleInit {
+  private readonly prices = new Map<string, number>();
 
-  private saleRepo(manager?: EntityManager) {
-    return manager ? manager.getRepository(Sale) : this.sales;
+  constructor(private readonly dataSource: DataSource) {}
+
+  async onModuleInit(): Promise<void> {
+    await this.refreshPrices();
   }
 
-  private itemRepo(manager?: EntityManager) {
-    return manager ? manager.getRepository(SaleItem) : this.items;
-  }
-
-  private paymentRepo(manager?: EntityManager) {
-    return manager ? manager.getRepository(Payment) : this.payments;
-  }
-
-  async findByIdempotencyKey(
-    storeId: string,
-    idempotencyKey: string,
-    manager?: EntityManager,
-  ): Promise<SaleGraph | null> {
-    const sale = await this.saleRepo(manager).findOne({ where: { storeId, idempotencyKey } });
-    if (!sale) {
-      return null;
+  async quoteCents(storeId: string, items: NewSaleLine[]): Promise<number> {
+    let total = 0;
+    for (const item of items) {
+      let price = this.prices.get(`${storeId}:${item.productId}`);
+      if (price === undefined) {
+        await this.refreshPrices();
+        price = this.prices.get(`${storeId}:${item.productId}`);
+      }
+      if (price === undefined) {
+        return 0;
+      }
+      total += price * item.quantity;
     }
-    return this.withChildren(sale, manager);
+    return total;
   }
 
-  async findById(storeId: string, saleId: string, manager?: EntityManager): Promise<SaleGraph | null> {
-    const sale = await this.saleRepo(manager).findOne({ where: { id: saleId, storeId } });
-    if (!sale) {
-      return null;
+  private async refreshPrices(): Promise<void> {
+    const rows: Array<{ store_id: string; id: string; price_cents: number }> = await this.dataSource.query(
+      `SELECT store_id, id, price_cents FROM products WHERE is_active = true`,
+    );
+    this.prices.clear();
+    for (const row of rows) {
+      this.prices.set(`${row.store_id}:${row.id}`, Number(row.price_cents));
     }
-    return this.withChildren(sale, manager);
+  }
+
+  findByIdempotencyKey(storeId: string, idempotencyKey: string): Promise<SaleGraph | null> {
+    return this.one(storeId, { idempotencyKey });
+  }
+
+  findById(storeId: string, saleId: string): Promise<SaleGraph | null> {
+    return this.one(storeId, { saleId });
   }
 
   async list(storeId: string, limit: number, idempotencyKey?: string): Promise<SaleGraph[]> {
-    const where = idempotencyKey ? { storeId, idempotencyKey } : { storeId };
-    const sales = await this.sales.find({
-      where,
-      order: { createdAt: 'DESC' },
-      take: limit,
-    });
-    if (sales.length === 0) {
-      return [];
-    }
-    const saleIds = sales.map((sale) => sale.id);
-    const [items, payments] = await Promise.all([
-      this.items.find({ where: { saleId: In(saleIds) } }),
-      this.payments.find({ where: { saleId: In(saleIds) } }),
-    ]);
-    return sales.map((sale) => ({
-      sale,
-      items: items.filter((item) => item.saleId === sale.id),
-      payment: payments.find((payment) => payment.saleId === sale.id) ?? null,
-    }));
+    const rows = await this.queryGraphs(storeId, limit, { idempotencyKey });
+    return rows.map((row) => toGraph(row));
   }
 
-  async insertPending(
-    manager: EntityManager,
-    input: {
-      storeId: string;
-      userId: string;
-      idempotencyKey: string;
-      requestHash: string;
-      totalCents: number;
-      lines: NewSaleLine[];
-    },
-  ): Promise<SaleGraph> {
-    const sale = await this.saleRepo(manager).save(
-      this.saleRepo(manager).create({
-        storeId: input.storeId,
-        userId: input.userId,
-        idempotencyKey: input.idempotencyKey,
-        requestHash: input.requestHash,
-        status: SaleStatus.PENDING,
-        totalCents: input.totalCents,
-        currency: CURRENCY,
-      }),
+  async createAtomic(input: {
+    storeId: string;
+    userId: string;
+    idempotencyKey: string;
+    requestHash: string;
+    provider: string;
+    paymentStatus: 'SUCCESS' | 'FAILED';
+    providerReference: string;
+    items: NewSaleLine[];
+  }): Promise<{ graph: SaleGraph; replayed: boolean }> {
+    const rows: Array<{ result: SaleJson | string }> = await this.dataSource.query(
+      `SELECT pos_create_sale($1, $2, $3, $4, $5, $6, $7, $8::jsonb) AS result`,
+      [
+        input.storeId,
+        input.userId,
+        input.idempotencyKey,
+        input.requestHash,
+        input.provider,
+        input.paymentStatus,
+        input.providerReference,
+        JSON.stringify(input.items.map((item) => ({ productId: item.productId, quantity: item.quantity }))),
+      ],
     );
-    const items = await this.itemRepo(manager).save(
-      input.lines.map((line) =>
-        this.itemRepo(manager).create({
-          saleId: sale.id,
-          productId: line.productId,
-          sku: line.sku,
-          productName: line.productName,
-          quantity: line.quantity,
-          unitPriceCents: line.unitPriceCents,
-          lineTotalCents: line.lineTotalCents,
-        }),
-      ),
-    );
-    return { sale, items, payment: null };
+    const result = parseJson<SaleJson>(rows[0]?.result);
+    return { graph: toGraph(result), replayed: result.replayed === true };
   }
 
-  markCompleted(
-    manager: EntityManager,
-    sale: Sale,
-    paymentInput: { provider: string; providerReference: string; amountCents: number },
-  ): Promise<Payment> {
-    return this.finish(manager, sale, SaleStatus.COMPLETED, 'SUCCESS', paymentInput);
+  private async one(
+    storeId: string,
+    filter: { saleId?: string; idempotencyKey?: string },
+  ): Promise<SaleGraph | null> {
+    const rows = await this.queryGraphs(storeId, 1, filter);
+    return rows[0] ? toGraph(rows[0]) : null;
   }
 
-  markFailed(
-    manager: EntityManager,
-    sale: Sale,
-    paymentInput: { provider: string; providerReference: string; amountCents: number },
-  ): Promise<Payment> {
-    return this.finish(manager, sale, SaleStatus.FAILED, 'FAILED', paymentInput);
-  }
-
-  private async finish(
-    manager: EntityManager,
-    sale: Sale,
-    status: SaleStatus,
-    paymentStatus: 'SUCCESS' | 'FAILED',
-    paymentInput: { provider: string; providerReference: string; amountCents: number },
-  ): Promise<Payment> {
-    sale.status = status;
-    await this.saleRepo(manager).save(sale);
-    return this.paymentRepo(manager).save(
-      this.paymentRepo(manager).create({
-        saleId: sale.id,
-        provider: paymentInput.provider,
-        status: paymentStatus,
-        amountCents: paymentInput.amountCents,
-        providerReference: paymentInput.providerReference,
-      }),
+  private queryGraphs(
+    storeId: string,
+    limit: number,
+    filter: { saleId?: string; idempotencyKey?: string },
+  ): Promise<SaleJson[]> {
+    return this.dataSource.query(
+      `SELECT
+         s.id,
+         s.store_id AS "storeId",
+         s.user_id AS "userId",
+         s.status,
+         s.currency,
+         s.total_cents AS "totalCents",
+         s.idempotency_key AS "idempotencyKey",
+         s.request_hash AS "requestHash",
+         s.created_at AS "createdAt",
+         COALESCE((
+           SELECT json_agg(json_build_object(
+             'productId', i.product_id,
+             'sku', i.sku,
+             'productName', i.product_name,
+             'quantity', i.quantity,
+             'unitPriceCents', i.unit_price_cents,
+             'lineTotalCents', i.line_total_cents
+           ) ORDER BY i.product_id)
+           FROM sale_items i
+           WHERE i.sale_id = s.id
+         ), '[]'::json) AS items,
+         (
+           SELECT json_build_object(
+             'provider', pay.provider,
+             'status', pay.status,
+             'amountCents', pay.amount_cents,
+             'providerReference', pay.provider_reference
+           )
+           FROM payments pay
+           WHERE pay.sale_id = s.id
+         ) AS payment
+       FROM sales s
+       WHERE s.store_id = $1
+         AND ($2::uuid IS NULL OR s.id = $2)
+         AND ($3::varchar IS NULL OR s.idempotency_key = $3)
+       ORDER BY s.created_at DESC
+       LIMIT $4`,
+      [storeId, filter.saleId ?? null, filter.idempotencyKey ?? null, limit],
     );
   }
+}
 
-  private async withChildren(sale: Sale, manager?: EntityManager): Promise<SaleGraph> {
-    const [items, payment] = await Promise.all([
-      this.itemRepo(manager).find({ where: { saleId: sale.id }, order: { productId: 'ASC' } }),
-      this.paymentRepo(manager).findOne({ where: { saleId: sale.id } }),
-    ]);
-    return { sale, items, payment };
+function toGraph(row: SaleJson): SaleGraph {
+  const items = parseJson<SaleItem[]>(row.items ?? []) ?? [];
+  const payment = row.payment ? parseJson<Payment>(row.payment) : null;
+  return {
+    sale: {
+      id: row.id,
+      storeId: row.storeId,
+      userId: row.userId,
+      status: row.status,
+      currency: row.currency,
+      totalCents: Number(row.totalCents),
+      idempotencyKey: row.idempotencyKey,
+      requestHash: row.requestHash,
+      createdAt: row.createdAt,
+    } as Sale,
+    items: items.map((item) => ({
+      ...item,
+      quantity: Number(item.quantity),
+      unitPriceCents: Number(item.unitPriceCents),
+      lineTotalCents: Number(item.lineTotalCents),
+    })),
+    payment: payment
+      ? ({
+          ...payment,
+          amountCents: Number(payment.amountCents),
+        } as Payment)
+      : null,
+  };
+}
+
+function parseJson<T>(value: T | string | null): T {
+  if (typeof value === 'string') {
+    return JSON.parse(value) as T;
   }
+  return value as T;
 }

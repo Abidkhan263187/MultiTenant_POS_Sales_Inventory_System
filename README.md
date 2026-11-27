@@ -1,42 +1,19 @@
 # Multi-tenant POS API
 
-Backend for a simplified point-of-sale platform. Merchants have stores, each store has its own products and inventory, and a sale updates stock and payment in one database transaction.
+A point-of-sale API for more than one business on one database. Abid and Swazei are the demo merchants. Each has stores, a catalog, and stock. A sale prices the cart from the catalog, takes payment, and updates stock together.
 
-## Stack
+## Setup and environment configuration
 
-- NestJS and TypeScript
-- PostgreSQL with TypeORM
-- JWT authentication
-- Redis for the product catalog cache (optional at runtime)
-- Jest and Supertest
-
-## Run it from the repository
-
-The repository does not contain `.env` or database passwords. After cloning, create that file locally. You need Node.js 20 or newer and a PostgreSQL database. Redis is optional.
-
-### 1. Clone and install
+You need Node.js 20 or newer and PostgreSQL. Redis is optional. The repository does not contain `.env` or passwords.
 
 ```bash
-git clone <your-repository-url>
-cd POS
 npm install
-```
-
-### 2. Create the environment file
-
-Windows:
-
-```bash
 copy .env.example .env
 ```
 
-macOS and Linux:
+On macOS or Linux, use `cp .env.example .env` instead of `copy`.
 
-```bash
-cp .env.example .env
-```
-
-Open `.env` and set your own database URL and JWT secret:
+Open `.env` and set your own values:
 
 ```env
 DATABASE_URL=postgresql://postgres:your-password@your-host:5432/postgres
@@ -44,111 +21,160 @@ DATABASE_SSL=false
 JWT_SECRET=replace-with-a-long-random-string
 ```
 
-Use `DATABASE_SSL=true` for Supabase. Use `DATABASE_SSL=false` for PostgreSQL running on your own machine.
+Use `DATABASE_SSL=true` for Supabase and `DATABASE_SSL=false` for PostgreSQL on your own machine. If the password contains `@`, `#`, `%`, or `:`, encode it in the URL. `@` is `%40`. An unencoded `@` makes the host wrong.
 
-If the password contains `@`, `#`, `%`, or `:`, encode that character in the URL. `@` is `%40`. An unencoded `@` makes the host part of the URL wrong.
+For Supabase, copy the connection string from **Project Settings → Database → Connection string**. If `db.<project-ref>.supabase.co` does not resolve, use the session pooler string. The pooler username looks like `postgres.<project-ref>`. Keep `DATABASE_SSL=true`.
 
-For Supabase, copy the connection string from **Project Settings → Database → Connection string**. If `db.<project-ref>.supabase.co` does not resolve or only has an IPv6 address, use the **Session pooler** string instead. The pooler username looks like `postgres.<project-ref>`. Keep `DATABASE_SSL=true`.
+Other settings in `.env.example`:
 
-`.env.example` shows the variable names. Do not commit `.env`.
+| Variable | Purpose |
+| --- | --- |
+| `JWT_EXPIRES_IN` | Token lifetime. Default `12h`. |
+| `DB_MIGRATE_ON_START` | Run migrations when the API starts. Default `true`. |
+| `REDIS_URL` | Local catalog cache, for example `redis://127.0.0.1:6379`. |
+| `REDIS_SERVER` | Full path to `redis-server` if it is not on your PATH. |
+| `CACHE_TTL_SECONDS` | How long a product list stays in Redis. Default 60. |
+| `LOGIN_RATE_LIMIT` | Login attempts per address. Default 30 per 15 minutes. |
+| `LOGIN_EMAIL_RATE_LIMIT` | Login attempts per email. Default 20 per 15 minutes. |
+| `API_RATE_LIMIT` | Other requests per address. Default 300 per minute. |
 
-### 3. Create the tables and sample data
+Create the tables and demo data, then start the API:
 
 ```bash
 npm run migration:run
 npm run seed
-```
-
-The migration creates merchants, stores, users, products, inventory, sales, and payments. The seed loads two merchants and the demo users below. Running the seed again is safe: if the demo admin already exists, it skips.
-
-### 4. Start the API
-
-```bash
 npm run start:dev
 ```
 
-Open `http://localhost:3000/api/health`. A healthy response looks like:
+`npm run seed` clears merchants, stores, users, products, stock, sales, and payments, then loads the demo again. Do not run it against a database you need to keep.
 
-```json
-{ "status": "ok", "database": "up", "redis": "disabled" }
-```
+Open `http://localhost:3000/api/health`. A healthy response is `{ "status": "ok", "database": "up", "redis": "up" }` or `"redis": "disabled"` when Redis is not configured.
 
-`redis` is `"disabled"` until Redis is configured. The API still serves product lists from PostgreSQL. Startup also runs migrations unless `DB_MIGRATE_ON_START=false`.
-
-### 5. Call the API
-
-Import `postman/pos-system.postman_collection.json`. Run **Login store 1 cashier** first. That saves the token for the later requests.
-
-Or log in directly:
+Import `postman/pos-system.postman_collection.json` and run **Login Abid Cafe Connaught Place cashier** first. Or log in directly:
 
 ```http
 POST http://localhost:3000/api/auth/login
 Content-Type: application/json
 
-{ "email": "cashier.store1@pos.test", "password": "Password123!" }
+{ "email": "cashier.connaught@pos.test", "password": "Password123!" }
 ```
 
-Use the returned `accessToken` as `Authorization: Bearer <token>`.
+Send the returned `accessToken` as `Authorization: Bearer <token>`.
 
-### 6. Optional: Redis catalog cache
+Every demo user uses the password `Password123!`.
 
-Install Redis and start it so it listens on port 6379. On Windows, `winget install taizod1024.redis-windows-fork`, then open a new terminal and run `redis-server`.
-
-Add this to `.env`:
-
-```env
-REDIS_URL=redis://127.0.0.1:6379
-```
-
-Stop the API and run `npm run start:dev` again. `.env` is read only when the process starts. The log should include `Redis cache connected`, and `/api/health` should show `"redis": "up"`.
-
-`GET /api/stores/:storeId/products` then returns `X-Cache: MISS` the first time and `X-Cache: HIT` after that. Creating or updating a product clears that store's cache.
-
-### Demo users
-
-Password for every user: `Password123!`
-
-| Email | Role | Access |
+| Email | Who | Access |
 | --- | --- | --- |
-| admin.a@pos.test | Merchant admin | Both Merchant A stores |
-| manager.store1@pos.test | Store manager | Store 1 |
-| cashier.store1@pos.test | Cashier | Store 1 |
-| cashier.store2@pos.test | Cashier | Store 2 |
-| admin.b@pos.test | Merchant admin | Merchant B |
-| cashier.store3@pos.test | Cashier | Store 3 |
+| abid@pos.test | Abid, merchant admin | Both Abid stores |
+| manager.connaught@pos.test | Connaught Place manager | Abid Cafe, Connaught Place |
+| cashier.connaught@pos.test | Connaught Place cashier | Abid Cafe, Connaught Place |
+| cashier.citywalk@pos.test | Select Citywalk cashier | Abid Cafe, Select Citywalk |
+| swazei@pos.test | Swazei, merchant admin | Swazei Bakes, IGI Airport |
+| cashier.igi@pos.test | IGI Airport cashier | Swazei Bakes, IGI Airport |
 
-Merchant A has Store 1 (Downtown) and Store 2 (Mall). Merchant B has Store 3 (Airport). Store 1 starts with Americano (₹30.00, 50 on hand) and Masala Tea (₹20.00, 5 on hand).
+Connaught Place starts with Americano (₹30.00, 50), Masala Chai (₹20.00, 5), Veg Samosa (₹25.00, 40), and Butter Croissant (₹80.00, 24). Select Citywalk starts with Chocolate Muffin (₹45.00, 30) and Cold Coffee (₹90.00, 18). IGI Airport starts with Grilled Vegetable Sandwich (₹120.00, 15) and Filter Coffee (₹40.00, 20).
 
-### Tests
+JSON prices are paise. `priceLabel` and `totalLabel` are the rupee text a cashier can read.
+
+Helmet adds the usual browser headers (`nosniff`, frame protection, no `X-Powered-By`). Login is limited so a wrong password cannot be guessed in a tight loop. A blocked call returns `429` and `Retry-After`.
 
 ```bash
 npm test
 npm run test:unit
 ```
 
-`npm test` uses `DATABASE_URL` from `.env`, migrates, seeds, and covers a successful sale, a failed payment, insufficient stock, cross-tenant access, and a duplicate idempotency key. A concurrent stock test is included.
+`npm test` migrates, seeds, and covers a paid sale, a declined payment, insufficient stock, another tenant, a repeated idempotency key, and two tills selling the last units at the same time.
 
-## API overview
+## Database and schema decisions
+
+Migrations in `src/database/migrations` own the schema. TypeORM `synchronize` is off.
+
+```
+merchants 1---* stores 1---* users
+stores 1---* products 1---1 inventory
+stores 1---* sales *---1 users
+sales 1---* sale_items *---1 products
+sales 1---1 payments
+sales 1---1 payment_events
+```
+
+Money is an integer number of paise, so totals do not use floating point. A product price is unique to a store: `(store_id, sku)` is unique, and the same SKU may exist in another store. Stock is one row per product in a store, and `quantity_on_hand` cannot go below zero. That check is in the database, not only in application code.
+
+A sale line copies the SKU, name, and unit price at the time of sale. A later price change does not rewrite old receipts. `(store_id, idempotency_key)` is unique, so the same till tap cannot insert two sales.
+
+A merchant admin must have `store_id` null. A manager or cashier must have a store. Foreign keys use `ON DELETE RESTRICT`, so a product that has been sold cannot be deleted out from under a receipt. `payment_events` is the lookup table for declined and successful payments: merchant, store, cashier, sale, amount, and products.
+
+## Tenant isolation approach
+
+The signed token carries the user id, role, merchant, and store. The API does not query the user table on every request.
+
+`StoreAccessGuard` checks the store in the URL. The store list is kept in memory and reloaded when a store is missing or the list is older than a minute. The guard returns 403 when the store belongs to another merchant, or when a cashier or manager asks for a store that is not theirs. A missing store is 404.
+
+Product, stock, and sale queries always include that store id. Sending another business's product id does not read or sell their stock. Abid can use both Abid stores. Abid cannot open Swazei's store.
+
+## Transaction and concurrency strategy
+
+A sale is one database call, `pos_create_sale`. PostgreSQL runs that function as a single `READ COMMITTED` transaction:
+
+1. If this store already has the idempotency key, return that sale.
+2. Load the active products and use their prices. The client does not send a price.
+3. Lock the stock rows with `SELECT … FOR UPDATE`, in product id order, so two tills cannot deadlock by locking the same rows in opposite orders.
+4. If any line asks for more than `quantity_on_hand`, stop. Nothing is saved.
+5. Insert the sale and its lines. The unique key is claimed in that statement.
+6. Store the payment result. On failure the sale is `FAILED` and stock is unchanged. On success, subtract stock only where `quantity_on_hand` is still enough, and mark the sale `COMPLETED`.
+
+Two tills each selling 3 units when stock is 5 are serialized by the row lock. The second sale sees 2 left and is rejected. The conditional update is a second guard. A deadlock comes back as `409 CONCURRENT_CONFLICT`.
+
+A stock receipt uses the same row lock and adds a delta, so a delivery cannot overwrite a sale with an absolute count.
+
+The mock payment decision is made in the application, then the function saves the sale, the payment, and the stock change together. That is safe for the mock because it has no external side effect. A real card provider can succeed and the process can die before commit. Production code should send the same idempotency key to the provider and reconcile charges that have no committed sale. That reconciliation is out of scope here.
+
+There is no message queue. The sale is short and must commit stock and payment together, so a queue would only add a gap between "paid" and "stock updated."
+
+## Idempotency approach
+
+The till sends `Idempotency-Key`. The server stores a hash of the merged lines and the mock payment outcome.
+
+- Same key and same body: the original sale is returned. `201` the first time, `200` on a retry, `402` when the first result was a declined payment. Stock is not reduced again.
+- Same key and a different body: `409 IDEMPOTENCY_PAYLOAD_MISMATCH`.
+- Two parallel requests with the same key: the unique index lets one insert win. The other reads that sale or hits the unique violation and returns it.
+- A declined payment is stored once. Retrying that key does not charge again. A new attempt needs a new key.
+
+Duplicate lines for one product in a single request are merged before pricing and hashing.
+
+## Redis and trade-offs
+
+Redis caches one thing: the product list for a store. The key is `pos:products:{storeId}` and it expires after `CACHE_TTL_SECONDS` (default 60). Creating or updating a product deletes that key. The first read is `X-Cache: MISS`. The next read is `X-Cache: HIT` and does not query PostgreSQL.
+
+If `REDIS_URL` points at this machine, `npm run start:dev` starts `redis-server` when port 6379 is free. If Redis is already running, the API uses it.
+
+Stock, sales, and payments are not cached. A sale has to see the quantity on hand at that moment. Caching stock would let two tills sell the same units.
+
+If Redis is unset or down, the API logs a warning and reads PostgreSQL. `X-Cache` is `BYPASS`. The sale still works. The trade-off is that a missed delete can show a stale name or price for up to a minute. There is no stampede protection; a catalog this small does not need it.
+
+## API
 
 | Method | Path | Who |
 | --- | --- | --- |
 | POST | `/api/auth/login` | Public |
 | GET | `/api/auth/me` | Any signed-in user |
-| GET | `/api/stores` | Stores the user may use |
-| GET | `/api/stores/:storeId/products` | Read catalog. Response header `X-Cache` is `HIT`, `MISS`, or `BYPASS` |
+| GET | `/api/stores` | Stores that user may use |
+| GET | `/api/stores/:storeId/products` | Catalog. Header `X-Cache` is `HIT`, `MISS`, or `BYPASS` |
 | POST | `/api/stores/:storeId/products` | Merchant admin, store manager |
 | PATCH | `/api/stores/:storeId/products/:productId` | Merchant admin, store manager |
-| GET | `/api/stores/:storeId/inventory` | Read stock |
+| GET | `/api/stores/:storeId/inventory` | Stock |
 | POST | `/api/stores/:storeId/inventory/adjustments` | Merchant admin, store manager. Body `{ productId, delta }` |
 | POST | `/api/stores/:storeId/sales` | Create a sale. Header `Idempotency-Key` is required |
 | GET | `/api/stores/:storeId/sales` | List sales. Optional `idempotencyKey` and `limit` |
 | GET | `/api/stores/:storeId/sales/:saleId` | One sale |
+| GET | `/api/stores/:storeId/payment-events` | Payment log. Merchant admin or store manager. Optional `paymentStatus`, `userId`, `productId`, `limit` |
+| GET | `/api/stores/:storeId/payment-events/summary` | Failed and paid totals for that store |
+| GET | `/api/payment-events` | Payment log for every store that user may use |
+| GET | `/api/payment-events/summary` | Failed and paid totals for those stores |
 
-`/api/stores/:storeId/orders` is the same resource as sales. A sale is the order.
+`/api/stores/:storeId/orders` is the same resource as sales.
 
-Prices are integer minor units (paise). The client does not send a price. `paymentOutcome` is only a switch for the mock provider (`SUCCESS` or `FAILED`).
-
-Example sale:
+`paymentOutcome` is only a switch for the mock provider (`SUCCESS` or `FAILED`). It is not a price. A declined payment is a `FAILED` sale: money was not taken and stock was not changed, so there is nothing to refund. A successful payment is the row to open when a customer asks for a refund. Cashiers cannot read the payment log.
 
 ```http
 POST /api/stores/11111111-1111-4111-8111-111111111101/sales
@@ -161,102 +187,17 @@ Idempotency-Key: 4f1c0b2e-6a1d-4c2a-9e5b-1a2b3c4d5e6f
 }
 ```
 
-## Database
-
-Migrations live in `src/database/migrations`. The first creates the schema. The second allows a sale status of `FAILED`.
-
-```
-merchants 1---* stores 1---* users
-stores 1---* products 1---1 inventory
-stores 1---* sales *---1 users
-sales 1---* sale_items *---1 products
-sales 1---1 payments
-```
-
-Choices:
-
-- Money is `integer` cents so totals do not use floating point.
-- `products (store_id, sku)` is unique. SKU can repeat in another store.
-- `inventory (store_id, product_id)` is unique, with `quantity_on_hand >= 0`.
-- `sales (store_id, idempotency_key)` is unique.
-- Sale lines store the sku, name, and unit price from the moment of sale.
-- A merchant admin must have `store_id` null. A manager or cashier must have a store. That is a database check, not only application code.
-- Foreign keys use `ON DELETE RESTRICT`.
-- Indexes cover store lookups, user lookup, and sales listed by time.
-
-`synchronize` is off. Schema changes go through migrations.
-
-## Tenant isolation
-
-The JWT is loaded into the user on each request (id, role, merchant, store). `StoreAccessGuard` loads the store from the URL and rejects the request when:
-
-- the store belongs to another merchant (403), or
-- the user is a cashier or manager for a different store (403).
-
-A missing store is 404. Product, inventory, and sale queries always include that authorized `storeId`, so substituting another tenant's product id does not read or sell their stock. Merchant admins can use every store of their own merchant only.
-
-## Transactions and concurrency
-
-Creating a sale runs in one `READ COMMITTED` transaction:
-
-1. If this store already has the idempotency key, return that sale.
-2. Load active products for this store and use their prices.
-3. `SELECT ... FOR UPDATE` the inventory rows, ordered by product id, so two sales cannot deadlock by locking the same rows in opposite orders.
-4. Reject the sale if any line asks for more than `quantity_on_hand`.
-5. Insert the sale as `PENDING` with its lines. The unique key is claimed before payment.
-6. Call the payment provider.
-7. On failure, mark the sale `FAILED`, store the declined payment, and commit. Stock is not changed.
-8. On success, `UPDATE inventory SET quantity_on_hand = quantity_on_hand - $qty WHERE quantity_on_hand >= $qty`.
-9. Mark the sale `COMPLETED` and insert the successful payment row.
-10. Commit.
-
-Two terminals selling 3 units from a stock of 5 are serialized by the row lock. The second sale sees the remaining 2 and is rejected. The conditional update is a second guard if the locked quantity changed. A database deadlock is returned as `409 CONCURRENT_CONFLICT`.
-
-Stock receipts use the same row lock and add a delta (`quantity_on_hand + delta >= 0`) so a receipt does not overwrite a sale with an absolute count.
-
-The mock provider is called inside the transaction. That keeps the sale and the stock in one commit, and it is safe here because the mock has no external side effect. A real provider can succeed and then the process can die before commit. Production code should send the same idempotency key to the provider and reconcile charges that have no committed sale. That saga is out of scope for this assignment.
-
-## Idempotency
-
-The POS sends `Idempotency-Key`. The server stores a hash of the merged line items and the mock payment outcome.
-
-- Same key and same body: the original sale is returned (`200` on a retry, `201` the first time, `402` when the first result was a failed payment). Stock is not reduced again.
-- Same key and a different body: `409 IDEMPOTENCY_PAYLOAD_MISMATCH`.
-- Two parallel requests with the same key: the unique index `(store_id, idempotency_key)` lets one insert win. The other waits, then either reads the committed sale or hits the unique violation and returns that sale.
-- A failed payment is stored once. Retrying that same key returns the failed sale and does not charge or change stock again. A new attempt needs a new key.
-
-Duplicate lines for one product in a single request are merged before pricing and hashing.
-
-## Payments
-
-`PaymentProvider` is the only payment API the sale service calls. `MockPaymentProvider` is bound to that token in `PaymentsModule`. `paymentOutcome: "FAILED"` makes the mock decline. The sale service does not set a sale to paid by itself; it uses the provider result. Replacing the mock means implementing `charge()` and changing the binding.
-
-## Redis
-
-`GET /api/stores/:storeId/products` is the cached read. The key is `pos:products:{storeId}` and the TTL is `CACHE_TTL_SECONDS` (default 60). Creating or updating a product deletes that key. Inventory is not cached, because a sale must see current stock.
-
-If `REDIS_URL` is unset, or Redis is down, the service logs a warning and reads PostgreSQL. `X-Cache` is `BYPASS` in that case. The API does not fail because the cache is down.
-
-Trade-off: a short TTL can serve a stale catalog for up to a minute if a delete is missed. Stock is never taken from this cache. There is no stampede protection; a catalog this small does not need it.
-
 ## Assumptions
 
-- There is no public registration. Users are created by the seed.
-- A sale is the order. A declined payment is stored as a `FAILED` sale with its payment row, and inventory is left unchanged.
-- `paymentOutcome` exists so tests and Postman can force the mock result. It is not a price and it is not used as the amount.
-- Cashiers can sell and view. Managers and merchant admins can also change products and stock.
-- One catalog is loaded in full per store. Pagination can be added if a store grows past a few hundred products.
-
-## Project layout
+There is no public registration. Users come from the seed. Cashiers sell and view. Managers and merchant admins also change products and stock. One catalog is loaded in full per store. Pagination can be added if a store grows past a few hundred products.
 
 ```
-src/auth            login, JWT, user lookup
-src/stores          store list and tenant checks
-src/products        catalog and Redis cache
-src/inventory       stock reads and adjustments
-src/sales           sale transaction, idempotency
-src/payments        payment provider and mock
-src/database        entities, migration, seed
+src/auth              login and JWT
+src/stores            store list and tenant checks
+src/products          catalog and Redis cache
+src/inventory         stock
+src/sales             sale, idempotency
+src/payments          payment provider and mock
+src/payment-events    payment log for refund lookup
+src/database          schema, migrations, seed
 ```
-
-Controllers call services. Services call repositories. Repositories are the TypeORM query layer.

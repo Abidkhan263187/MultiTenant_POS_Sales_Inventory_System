@@ -18,7 +18,10 @@ export function typeOrmConfig(): DataSourceOptions {
     logging: process.env.DB_LOGGING === 'true',
     migrations: [__dirname + '/migrations/*{.ts,.js}'],
     extra: {
-      max: 8,
+      max: 10,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 5_000,
+      keepAlive: true,
       application_name: 'pos-system',
     },
   };

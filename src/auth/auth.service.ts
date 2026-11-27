@@ -9,6 +9,10 @@ import { UsersRepository } from './users.repository';
 interface JwtPayload {
   sub: string;
   email: string;
+  fullName: string;
+  role: AuthUser['role'];
+  merchantId: string;
+  storeId: string | null;
 }
 
 @Injectable()
@@ -26,11 +30,18 @@ export class AuthService {
     if (!user || !passwordMatches) {
       throw new UnauthorizedException({
         code: 'UNAUTHORIZED',
-        message: 'Invalid email or password',
+        message: 'The email or password is incorrect.',
       });
     }
 
-    const payload: JwtPayload = { sub: user.id, email: user.email };
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      fullName: user.fullName,
+      role: user.role,
+      merchantId: user.merchantId,
+      storeId: user.storeId,
+    };
     const expiresIn = this.config.get<string>('JWT_EXPIRES_IN', '12h');
     const accessToken = await this.jwt.signAsync(payload);
 

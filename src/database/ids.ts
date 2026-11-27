@@ -1,12 +1,12 @@
 export const DEMO_PASSWORD = 'Password123!';
 
 export const DEMO_USERS = {
-  adminA: 'admin.a@pos.test',
-  managerStore1: 'manager.store1@pos.test',
-  cashierStore1: 'cashier.store1@pos.test',
-  cashierStore2: 'cashier.store2@pos.test',
-  adminB: 'admin.b@pos.test',
-  cashierStore3: 'cashier.store3@pos.test',
+  adminA: 'abid@pos.test',
+  managerStore1: 'manager.connaught@pos.test',
+  cashierStore1: 'cashier.connaught@pos.test',
+  cashierStore2: 'cashier.citywalk@pos.test',
+  adminB: 'swazei@pos.test',
+  cashierStore3: 'cashier.igi@pos.test',
 };
 
 export const IDS = {
@@ -23,6 +23,10 @@ export const IDS = {
   userCashier3: '22222222-2222-4222-8222-222222222206',
   productCoffee: '11111111-1111-4111-8111-111111111301',
   productTea: '11111111-1111-4111-8111-111111111302',
+  productSamosa: '11111111-1111-4111-8111-111111111305',
+  productCroissant: '11111111-1111-4111-8111-111111111306',
   productMuffin: '11111111-1111-4111-8111-111111111303',
+  productColdCoffee: '11111111-1111-4111-8111-111111111307',
   productSandwich: '22222222-2222-4222-8222-222222222304',
+  productFilterCoffee: '22222222-2222-4222-8222-222222222308',
 };

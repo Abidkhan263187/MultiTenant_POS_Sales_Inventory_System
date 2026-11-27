@@ -60,7 +60,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
           code = record.code;
         }
         const extra: Record<string, unknown> = {};
-        for (const key of ['productId', 'available', 'requested']) {
+        for (const key of ['productId', 'available', 'requested', 'errors']) {
           if (record[key] !== undefined) {
             extra[key] = record[key];
           }
@@ -70,30 +70,52 @@ export class AllExceptionsFilter implements ExceptionFilter {
         }
       }
 
-      return { status, code, message, details };
+      return { status, code, message: friendlyMessage(message), details };
     }
 
     const dbCode = postgresErrorCode(exception);
     if (dbCode === '23505') {
-      return { status: HttpStatus.CONFLICT, code: 'CONFLICT', message: 'Duplicate record' };
+      return {
+        status: HttpStatus.CONFLICT,
+        code: 'CONFLICT',
+        message: 'That record already exists. Use a different value.',
+      };
     }
     if (dbCode === '40P01' || dbCode === '40001') {
       return {
         status: HttpStatus.CONFLICT,
         code: 'CONCURRENT_CONFLICT',
-        message: 'Concurrent update conflict. Please retry.',
+        message: 'Someone else updated this at the same time. Please try again.',
       };
     }
     if (dbCode === '22P02') {
-      return { status: HttpStatus.BAD_REQUEST, code: 'VALIDATION_ERROR', message: 'Invalid identifier' };
+      return {
+        status: HttpStatus.BAD_REQUEST,
+        code: 'VALIDATION_ERROR',
+        message: 'That id is not valid. Copy the store, product, or sale id from the list.',
+      };
     }
 
     return {
       status: HttpStatus.INTERNAL_SERVER_ERROR,
       code: 'INTERNAL_ERROR',
-      message: 'Internal server error',
+      message: 'Something went wrong while saving this. Please try again.',
     };
   }
+}
+
+function friendlyMessage(message: string | string[]): string {
+  const text = Array.isArray(message) ? message.join(' ') : message;
+  if (/uuid is expected/i.test(text)) {
+    return 'That id is not valid. Copy the store, product, or sale id from the list.';
+  }
+  if (/unexpected token|entity\.parse|not valid json/i.test(text)) {
+    return 'The request body is not valid JSON.';
+  }
+  if (text === 'Unauthorized') {
+    return 'Sign in again. The login token is missing or no longer valid.';
+  }
+  return text;
 }
 
 function defaultCode(status: number): string {
@@ -110,6 +132,8 @@ function defaultCode(status: number): string {
       return 'NOT_FOUND';
     case HttpStatus.CONFLICT:
       return 'CONFLICT';
+    case HttpStatus.TOO_MANY_REQUESTS:
+      return 'RATE_LIMITED';
     default:
       return status >= 500 ? 'INTERNAL_ERROR' : 'ERROR';
   }

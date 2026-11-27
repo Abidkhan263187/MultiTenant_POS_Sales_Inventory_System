@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { formatInr } from '../common/money';
 import { Product } from '../database/entities';
 import { AdjustInventoryDto } from './dto/adjust-inventory.dto';
 import { InventoryRepository } from './inventory.repository';
@@ -9,6 +10,7 @@ export interface InventoryView {
   sku: string;
   name: string;
   priceCents: number;
+  priceLabel: string;
   isActive: boolean;
   quantityOnHand: number;
 }
@@ -21,37 +23,20 @@ export class InventoryService {
   ) {}
 
   async list(storeId: string): Promise<InventoryView[]> {
-    const rows = await this.inventory.findByStore(storeId);
-    if (rows.length === 0) {
-      return [];
-    }
-    const products = await this.dataSource.getRepository(Product).find({ where: { storeId } });
-    const byId = new Map(products.map((product) => [product.id, product]));
-
-    return rows
-      .map((row) => {
-        const product = byId.get(row.productId);
-        if (!product) {
-          return null;
-        }
-        return {
-          productId: product.id,
-          sku: product.sku,
-          name: product.name,
-          priceCents: product.priceCents,
-          isActive: product.isActive,
-          quantityOnHand: row.quantityOnHand,
-        };
-      })
-      .filter((row): row is InventoryView => row !== null)
-      .sort((a, b) => a.name.localeCompare(b.name));
+    const rows = await this.inventory.listForStore(storeId);
+    return rows.map((row) => ({
+      ...row,
+      priceLabel: formatInr(Number(row.priceCents)),
+      priceCents: Number(row.priceCents),
+      quantityOnHand: Number(row.quantityOnHand),
+    }));
   }
 
   async adjust(storeId: string, dto: AdjustInventoryDto): Promise<InventoryView> {
     if (dto.delta === 0) {
       throw new BadRequestException({
         code: 'VALIDATION_ERROR',
-        message: 'Inventory delta cannot be zero',
+        message: 'Enter how many units to add or remove. Zero does not change the stock.',
       });
     }
 
@@ -59,22 +44,32 @@ export class InventoryService {
       where: { id: dto.productId, storeId },
     });
     if (!product) {
-      throw new NotFoundException({ code: 'NOT_FOUND', message: 'Product not found in this store' });
+      throw new NotFoundException({
+        code: 'NOT_FOUND',
+        message: 'That product was not found in this store.',
+      });
     }
 
     const affected = await this.dataSource.transaction(async (manager) => {
       const locked = await this.inventory.lockForUpdate(storeId, [dto.productId], manager);
       if (locked.length !== 1) {
-        throw new NotFoundException({ code: 'NOT_FOUND', message: 'Inventory record not found' });
+        throw new NotFoundException({
+          code: 'NOT_FOUND',
+          message: 'This product has no stock record. Set the opening stock before adjusting it.',
+        });
       }
-      return this.inventory.applyDelta(manager, storeId, dto.productId, dto.delta);
+      const affected = await this.inventory.applyDelta(manager, storeId, dto.productId, dto.delta);
+      return { affected, onHand: locked[0].quantityOnHand };
     });
 
-    if (affected !== 1) {
+    if (affected.affected !== 1) {
+      const removing = Math.abs(dto.delta);
       throw new ConflictException({
         code: 'INSUFFICIENT_INVENTORY',
-        message: 'Adjustment would make stock negative',
+        message: `${product.name} has ${affected.onHand} in stock. Removing ${removing} would take it below zero, so the stock was left unchanged.`,
         productId: dto.productId,
+        available: affected.onHand,
+        requested: removing,
       });
     }
 
@@ -84,6 +79,7 @@ export class InventoryService {
       sku: product.sku,
       name: product.name,
       priceCents: product.priceCents,
+      priceLabel: formatInr(product.priceCents),
       isActive: product.isActive,
       quantityOnHand: updated?.quantityOnHand ?? 0,
     };

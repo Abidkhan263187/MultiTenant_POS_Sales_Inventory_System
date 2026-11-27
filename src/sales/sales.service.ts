@@ -5,15 +5,13 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { DataSource } from 'typeorm';
 import { AuthUser } from '../common/auth-user';
 import { CURRENCY, SaleStatus } from '../common/enums';
-import { isDeadlock, isUniqueViolation } from '../common/postgres-error';
-import { InventoryRepository } from '../inventory/inventory.repository';
+import { isDeadlock, isUniqueViolation, postgresErrorField } from '../common/postgres-error';
 import { PAYMENT_PROVIDER, PaymentProvider } from '../payments/payment-provider';
-import { ProductsRepository } from '../products/products.repository';
 import { CreateSaleDto, ListSalesQueryDto } from './dto/sale.dto';
 import { hashSaleRequest, mergeSaleItems } from './sale-request.util';
+import { formatInr } from '../common/money';
 import { SaleGraph, SalesRepository } from './sales.repository';
 
 export interface SaleView {
@@ -23,6 +21,8 @@ export interface SaleView {
   status: SaleStatus;
   currency: string;
   totalCents: number;
+  totalLabel: string;
+  summary: string;
   idempotencyKey: string;
   items: Array<{
     productId: string;
@@ -30,12 +30,15 @@ export interface SaleView {
     productName: string;
     quantity: number;
     unitPriceCents: number;
+    unitPriceLabel: string;
     lineTotalCents: number;
+    lineTotalLabel: string;
   }>;
   payment: {
     provider: string;
     status: string;
     amountCents: number;
+    amountLabel: string;
     providerReference: string;
   } | null;
   createdAt: Date;
@@ -45,9 +48,6 @@ export interface SaleView {
 export class SalesService {
   constructor(
     private readonly sales: SalesRepository,
-    private readonly products: ProductsRepository,
-    private readonly inventory: InventoryRepository,
-    private readonly dataSource: DataSource,
     @Inject(PAYMENT_PROVIDER) private readonly paymentProvider: PaymentProvider,
   ) {}
 
@@ -59,7 +59,10 @@ export class SalesService {
   async getOne(storeId: string, saleId: string): Promise<SaleView> {
     const graph = await this.sales.findById(storeId, saleId);
     if (!graph) {
-      throw new NotFoundException({ code: 'NOT_FOUND', message: 'Sale not found' });
+      throw new NotFoundException({
+        code: 'NOT_FOUND',
+        message: 'No sale was found with that id in this store.',
+      });
     }
     return toSaleView(graph);
   }
@@ -76,126 +79,36 @@ export class SalesService {
       if (!Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 1000) {
         throw new BadRequestException({
           code: 'VALIDATION_ERROR',
-          message: 'Combined quantity for a product must be between 1 and 1000',
+          message: 'Enter a quantity from 1 to 1000 for each product.',
         });
       }
     }
     const requestHash = hashSaleRequest(merged, dto.paymentOutcome);
 
+    const charge = await this.paymentProvider.charge({
+      amountCents: await this.sales.quoteCents(storeId, merged),
+      currency: CURRENCY,
+      idempotencyKey: key,
+      outcome: dto.paymentOutcome,
+    });
+
     try {
-      return await this.dataSource.transaction('READ COMMITTED', async (manager) => {
-        const existing = await this.sales.findByIdempotencyKey(storeId, key, manager);
-        if (existing) {
-          assertSamePayload(existing, requestHash);
-          return { sale: toSaleView(existing), replayed: true };
-        }
-
-        const productIds = merged.map((item) => item.productId);
-        const products = await this.products.findActiveInStore(storeId, productIds, manager);
-        if (products.length !== productIds.length) {
-          throw new BadRequestException({
-            code: 'INVALID_PRODUCT',
-            message: 'One or more products are not available in this store',
-          });
-        }
-        const productById = new Map(products.map((product) => [product.id, product]));
-
-        // Lock stock rows in product id order so two terminals cannot deadlock.
-        const inventoryRows = await this.inventory.lockForUpdate(storeId, productIds, manager);
-        if (inventoryRows.length !== productIds.length) {
-          throw new BadRequestException({
-            code: 'INVALID_PRODUCT',
-            message: 'Inventory is missing for one or more products',
-          });
-        }
-        const inventoryByProduct = new Map(inventoryRows.map((row) => [row.productId, row]));
-
-        const lines = merged.map((item) => {
-          const product = productById.get(item.productId)!;
-          const stock = inventoryByProduct.get(item.productId)!;
-          if (stock.quantityOnHand < item.quantity) {
-            throw new ConflictException({
-              code: 'INSUFFICIENT_INVENTORY',
-              message: `Insufficient inventory for ${product.sku}`,
-              productId: product.id,
-              available: stock.quantityOnHand,
-              requested: item.quantity,
-            });
-          }
-          return {
-            productId: product.id,
-            sku: product.sku,
-            productName: product.name,
-            quantity: item.quantity,
-            unitPriceCents: product.priceCents,
-            lineTotalCents: product.priceCents * item.quantity,
-          };
-        });
-
-        const totalCents = lines.reduce((sum, line) => sum + line.lineTotalCents, 0);
-        if (totalCents > 2_000_000_000) {
-          throw new BadRequestException({
-            code: 'AMOUNT_TOO_LARGE',
-            message: 'Sale total is too large',
-          });
-        }
-
-        // Insert first so a retried or parallel request cannot charge twice.
-        const pending = await this.sales.insertPending(manager, {
-          storeId,
-          userId: user.id,
-          idempotencyKey: key,
-          requestHash,
-          totalCents,
-          lines,
-        });
-
-        const charge = await this.paymentProvider.charge({
-          amountCents: totalCents,
-          currency: CURRENCY,
-          idempotencyKey: key,
-          outcome: dto.paymentOutcome,
-        });
-        if (charge.status !== 'SUCCESS') {
-          const payment = await this.sales.markFailed(manager, pending.sale, {
-            provider: charge.provider,
-            providerReference: charge.providerReference || `mock_fail_${key}`,
-            amountCents: totalCents,
-          });
-          return {
-            sale: toSaleView({ sale: pending.sale, items: pending.items, payment }),
-            replayed: false,
-          };
-        }
-
-        for (const line of lines) {
-          const affected = await this.inventory.decrementIfEnough(
-            manager,
-            storeId,
-            line.productId,
-            line.quantity,
-          );
-          if (affected !== 1) {
-            throw new ConflictException({
-              code: 'INSUFFICIENT_INVENTORY',
-              message: 'Insufficient inventory',
-              productId: line.productId,
-            });
-          }
-        }
-
-        const payment = await this.sales.markCompleted(manager, pending.sale, {
-          provider: charge.provider,
-          providerReference: charge.providerReference,
-          amountCents: totalCents,
-        });
-
-        return {
-          sale: toSaleView({ sale: pending.sale, items: pending.items, payment }),
-          replayed: false,
-        };
+      const created = await this.sales.createAtomic({
+        storeId,
+        userId: user.id,
+        idempotencyKey: key,
+        requestHash,
+        provider: charge.provider,
+        paymentStatus: charge.status === 'SUCCESS' ? 'SUCCESS' : 'FAILED',
+        providerReference: charge.providerReference || `mock_fail_${key}`,
+        items: merged,
       });
+      return { sale: toSaleView(created.graph), replayed: created.replayed };
     } catch (error) {
+      const raised = saleError(error);
+      if (raised) {
+        throw raised;
+      }
       if (isUniqueViolation(error)) {
         const existing = await this.sales.findByIdempotencyKey(storeId, key);
         if (existing) {
@@ -206,7 +119,7 @@ export class SalesService {
       if (isDeadlock(error)) {
         throw new ConflictException({
           code: 'CONCURRENT_CONFLICT',
-          message: 'Concurrent sale conflict. Please retry.',
+          message: 'Another sale updated this stock at the same time. Please try the sale again.',
         });
       }
       throw error;
@@ -219,17 +132,71 @@ function normalizeIdempotencyKey(value: string | undefined): string {
   if (!key || key.length > 128) {
     throw new BadRequestException({
       code: 'IDEMPOTENCY_KEY_REQUIRED',
-      message: 'Idempotency-Key header is required and must be at most 128 characters',
+      message:
+        'Add an Idempotency-Key header so a repeated tap does not charge the customer twice. Use at most 128 characters.',
     });
   }
   return key;
+}
+
+function saleError(error: unknown): BadRequestException | ConflictException | null {
+  const message = postgresErrorField(error, 'message');
+  if (message.includes('IDEMPOTENCY_PAYLOAD_MISMATCH')) {
+    return new ConflictException({
+      code: 'IDEMPOTENCY_PAYLOAD_MISMATCH',
+      message: 'This Idempotency-Key was already used for a different sale. Start a new sale with a new key.',
+    });
+  }
+  if (message.includes('INVALID_PRODUCT')) {
+    return new BadRequestException({
+      code: 'INVALID_PRODUCT',
+      message: 'One or more products are not sold at this store. Choose products from this store.',
+    });
+  }
+  if (message.includes('AMOUNT_TOO_LARGE')) {
+    return new BadRequestException({
+      code: 'AMOUNT_TOO_LARGE',
+      message: 'This sale total is too large to process.',
+    });
+  }
+  if (message.includes('INSUFFICIENT_INVENTORY')) {
+    const detail = parseDetail(postgresErrorField(error, 'detail'));
+    const available = Number(detail?.available);
+    const requested = Number(detail?.requested);
+    const name = typeof detail?.name === 'string' ? detail.name : 'This product';
+    return new ConflictException({
+      code: 'INSUFFICIENT_INVENTORY',
+      message:
+        available === 0
+          ? `${name} is out of stock, so this sale was not completed.`
+          : Number.isFinite(available) && Number.isFinite(requested)
+            ? `${name} has ${available} in stock. This sale asks for ${requested}, so it was not completed.`
+            : `${name} does not have enough stock. The sale was not completed and stock was not changed.`,
+      ...(detail?.productId ? { productId: detail.productId } : {}),
+      ...(Number.isFinite(available) ? { available } : {}),
+      ...(Number.isFinite(requested) ? { requested } : {}),
+    });
+  }
+  return null;
+}
+
+function parseDetail(detail: string): Record<string, unknown> | null {
+  if (!detail) {
+    return null;
+  }
+  try {
+    const value = JSON.parse(detail) as unknown;
+    return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 function assertSamePayload(existing: SaleGraph, requestHash: string): void {
   if (existing.sale.requestHash !== requestHash) {
     throw new ConflictException({
       code: 'IDEMPOTENCY_PAYLOAD_MISMATCH',
-      message: 'This idempotency key was already used with a different request',
+      message: 'This Idempotency-Key was already used for a different sale. Start a new sale with a new key.',
     });
   }
 }
@@ -243,6 +210,8 @@ function toSaleView(graph: SaleGraph): SaleView {
     status: graph.sale.status,
     currency: graph.sale.currency,
     totalCents: graph.sale.totalCents,
+    totalLabel: formatInr(graph.sale.totalCents),
+    summary: saleSummary(graph.sale.status, items, graph.sale.totalCents),
     idempotencyKey: graph.sale.idempotencyKey,
     items: items.map((item) => ({
       productId: item.productId,
@@ -250,16 +219,35 @@ function toSaleView(graph: SaleGraph): SaleView {
       productName: item.productName,
       quantity: item.quantity,
       unitPriceCents: item.unitPriceCents,
+      unitPriceLabel: formatInr(item.unitPriceCents),
       lineTotalCents: item.lineTotalCents,
+      lineTotalLabel: formatInr(item.lineTotalCents),
     })),
     payment: graph.payment
       ? {
           provider: graph.payment.provider,
           status: graph.payment.status,
           amountCents: graph.payment.amountCents,
+          amountLabel: formatInr(graph.payment.amountCents),
           providerReference: graph.payment.providerReference,
         }
       : null,
     createdAt: graph.sale.createdAt,
   };
+}
+
+function saleSummary(
+  status: SaleStatus,
+  items: Array<{ quantity: number; productName: string }>,
+  totalCents: number,
+): string {
+  const lines = items.map((item) => `${item.quantity} × ${item.productName}`).join(', ');
+  const total = formatInr(totalCents);
+  if (status === SaleStatus.FAILED) {
+    return `Payment was declined for ${lines}. Total ${total}. Stock was not changed.`;
+  }
+  if (status === SaleStatus.COMPLETED) {
+    return `Sale completed: ${lines}. Total ${total}. Stock has been updated.`;
+  }
+  return `Sale is waiting for payment: ${lines}. Total ${total}.`;
 }

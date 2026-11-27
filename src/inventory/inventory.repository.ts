@@ -18,6 +18,31 @@ export class InventoryRepository {
     return this.inventory.find({ where: { storeId }, order: { productId: 'ASC' } });
   }
 
+  listForStore(storeId: string): Promise<
+    Array<{
+      productId: string;
+      sku: string;
+      name: string;
+      priceCents: number;
+      isActive: boolean;
+      quantityOnHand: number;
+    }>
+  > {
+    return this.inventory.query(
+      `SELECT p.id AS "productId",
+              p.sku AS "sku",
+              p.name AS "name",
+              p.price_cents AS "priceCents",
+              p.is_active AS "isActive",
+              i.quantity_on_hand AS "quantityOnHand"
+       FROM inventory i
+       INNER JOIN products p ON p.id = i.product_id AND p.store_id = i.store_id
+       WHERE i.store_id = $1
+       ORDER BY p.name ASC`,
+      [storeId],
+    );
+  }
+
   findOne(storeId: string, productId: string, manager?: EntityManager): Promise<Inventory | null> {
     return this.repo(manager).findOne({ where: { storeId, productId } });
   }

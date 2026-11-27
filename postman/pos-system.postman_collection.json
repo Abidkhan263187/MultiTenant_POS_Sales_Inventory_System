@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Multi-tenant POS",
-    "description": "Sales, inventory, and tenant isolation for the POS API. Run the seed script first. Every demo user uses password Password123!. Amounts are integer paise.",
+    "description": "Sales, inventory, and tenant isolation for the POS API. Run the seed script first. Merchants are Abid and Swazei. Every demo user uses password Password123!. Amounts are integer paise, with rupee labels for display.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -19,7 +19,7 @@
       "name": "Auth",
       "item": [
         {
-          "name": "Login store 1 cashier",
+          "name": "Login Abid Cafe Connaught Place cashier",
           "event": [
             {
               "listen": "test",
@@ -40,13 +40,13 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"email\": \"cashier.store1@pos.test\",\n  \"password\": \"Password123!\"\n}"
+              "raw": "{\n  \"email\": \"cashier.connaught@pos.test\",\n  \"password\": \"Password123!\"\n}"
             },
             "url": "{{baseUrl}}/auth/login"
           }
         },
         {
-          "name": "Login merchant A admin",
+          "name": "Login Abid",
           "event": [
             {
               "listen": "test",
@@ -63,7 +63,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"email\": \"admin.a@pos.test\",\n  \"password\": \"Password123!\"\n}"
+              "raw": "{\n  \"email\": \"abid@pos.test\",\n  \"password\": \"Password123!\"\n}"
             },
             "url": "{{baseUrl}}/auth/login"
           }
@@ -223,7 +223,7 @@
       "name": "Tenant checks",
       "item": [
         {
-          "name": "Login merchant B cashier",
+          "name": "Login Swazei IGI Airport cashier",
           "event": [
             {
               "listen": "test",
@@ -240,13 +240,13 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"email\": \"cashier.store3@pos.test\",\n  \"password\": \"Password123!\"\n}"
+              "raw": "{\n  \"email\": \"cashier.igi@pos.test\",\n  \"password\": \"Password123!\"\n}"
             },
             "url": "{{baseUrl}}/auth/login"
           }
         },
         {
-          "name": "Merchant B cannot read Merchant A products",
+          "name": "Swazei cannot read Abid products",
           "request": {
             "method": "GET",
             "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],

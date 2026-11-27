@@ -17,13 +17,15 @@ export class RedisCacheService implements OnModuleDestroy {
       return;
     }
 
+    let reportedDown = false;
     this.client = new Redis(url, {
       maxRetriesPerRequest: 1,
       connectTimeout: 2000,
-      retryStrategy: () => null,
+      retryStrategy: (attempt) => Math.min(attempt * 500, 5000),
     });
     this.client.on('ready', () => {
       this.ready = true;
+      reportedDown = false;
       this.logger.log('Redis cache connected');
     });
     this.client.on('end', () => {
@@ -31,7 +33,10 @@ export class RedisCacheService implements OnModuleDestroy {
     });
     this.client.on('error', (error) => {
       this.ready = false;
-      this.logger.warn(`Redis unavailable: ${error.message}`);
+      if (!reportedDown) {
+        reportedDown = true;
+        this.logger.warn(`Redis unavailable: ${error.message}`);
+      }
     });
   }
 

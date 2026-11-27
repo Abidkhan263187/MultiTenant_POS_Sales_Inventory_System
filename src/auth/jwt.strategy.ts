@@ -20,13 +20,36 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: { sub?: string }): Promise<AuthUser> {
+  async validate(payload: {
+    sub?: string;
+    email?: string;
+    fullName?: string;
+    role?: AuthUser['role'];
+    merchantId?: string;
+    storeId?: string | null;
+  }): Promise<AuthUser> {
     if (!payload.sub) {
-      throw new UnauthorizedException({ code: 'UNAUTHORIZED', message: 'Invalid token' });
+      throw new UnauthorizedException({
+        code: 'UNAUTHORIZED',
+        message: 'Sign in again. The login token is missing or no longer valid.',
+      });
+    }
+    if (payload.role && payload.merchantId && payload.email && payload.fullName) {
+      return {
+        id: payload.sub,
+        email: payload.email,
+        fullName: payload.fullName,
+        role: payload.role,
+        merchantId: payload.merchantId,
+        storeId: payload.storeId ?? null,
+      };
     }
     const user = await this.users.findById(payload.sub);
     if (!user) {
-      throw new UnauthorizedException({ code: 'UNAUTHORIZED', message: 'Invalid token' });
+      throw new UnauthorizedException({
+        code: 'UNAUTHORIZED',
+        message: 'Sign in again. The login token is missing or no longer valid.',
+      });
     }
     return this.auth.toAuthUser(user);
   }

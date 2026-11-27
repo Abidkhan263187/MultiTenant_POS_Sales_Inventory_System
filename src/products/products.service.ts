@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { CacheStatus, RedisCacheService } from '../cache/redis-cache.service';
 import { isUniqueViolation } from '../common/postgres-error';
 import { Inventory, Product } from '../database/entities';
+import { formatInr } from '../common/money';
 import { CreateProductDto, UpdateProductDto } from './dto/product.dto';
 import { ProductsRepository } from './products.repository';
 
@@ -13,6 +14,7 @@ export interface ProductView {
   sku: string;
   name: string;
   priceCents: number;
+  priceLabel: string;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -42,7 +44,10 @@ export class ProductsService {
   async getOne(storeId: string, productId: string): Promise<ProductView> {
     const product = await this.products.findInStore(storeId, productId);
     if (!product) {
-      throw new NotFoundException({ code: 'NOT_FOUND', message: 'Product not found' });
+      throw new NotFoundException({
+        code: 'NOT_FOUND',
+        message: 'That product was not found in this store.',
+      });
     }
     return toProductView(product);
   }
@@ -52,7 +57,10 @@ export class ProductsService {
     const name = dto.name.trim();
     const existing = await this.products.findBySku(storeId, sku);
     if (existing) {
-      throw new ConflictException({ code: 'SKU_EXISTS', message: 'SKU already exists in this store' });
+      throw new ConflictException({
+        code: 'SKU_EXISTS',
+        message: `SKU ${sku} is already used in this store. Choose a different SKU.`,
+      });
     }
 
     try {
@@ -80,7 +88,10 @@ export class ProductsService {
       return toProductView(saved);
     } catch (error) {
       if (isUniqueViolation(error)) {
-        throw new ConflictException({ code: 'SKU_EXISTS', message: 'SKU already exists in this store' });
+        throw new ConflictException({
+          code: 'SKU_EXISTS',
+          message: `SKU ${sku} is already used in this store. Choose a different SKU.`,
+        });
       }
       throw error;
     }
@@ -90,13 +101,16 @@ export class ProductsService {
     if (dto.name === undefined && dto.priceCents === undefined && dto.isActive === undefined) {
       throw new BadRequestException({
         code: 'VALIDATION_ERROR',
-        message: 'Provide at least one field to update',
+        message: 'Choose at least one change: name, price, or whether the product is for sale.',
       });
     }
 
     const product = await this.products.findInStore(storeId, productId);
     if (!product) {
-      throw new NotFoundException({ code: 'NOT_FOUND', message: 'Product not found' });
+      throw new NotFoundException({
+        code: 'NOT_FOUND',
+        message: 'That product was not found in this store.',
+      });
     }
 
     if (dto.name !== undefined) {
@@ -131,6 +145,7 @@ export function toProductView(product: Product): ProductView {
     sku: product.sku,
     name: product.name,
     priceCents: product.priceCents,
+    priceLabel: formatInr(product.priceCents),
     isActive: product.isActive,
     createdAt: product.createdAt.toISOString(),
     updatedAt: product.updatedAt.toISOString(),
